@@ -5,14 +5,23 @@ import {
   PlusIcon,
   TrashIcon,
   MagnifyingGlassIcon,
+  ArrowUpTrayIcon,
 } from "@heroicons/react/24/solid";
 import type {
   BatimetriaResponse,
   Coordinate,
+  CsvSchema,
   Envelope,
   Result,
 } from "~/interfaces";
-import { API_URL, RADIUS, WKID } from "~/utils/constants";
+import {
+  API_URL,
+  BATCH_DELAY,
+  MAX_CONCURRENT_REQUESTS,
+  RADIUS,
+  WKID,
+} from "~/utils/constants";
+import * as Papa from "papaparse";
 
 export default function Home() {
   const [results, setResults] = useState<Result[]>([]);
@@ -84,34 +93,73 @@ export default function Home() {
     });
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     setError("");
     setResults([]);
-    const promises = returnPromises(coordinates);
-    const allResults = await Promise.all(promises);
-    setResults(allResults);
+
+    try {
+      const allResults = await runInBatches(
+        coordinates,
+        MAX_CONCURRENT_REQUESTS,
+      );
+      setResults(allResults);
+    } catch (err) {
+      setError("Erro durante a consulta em lote.");
+      console.error(err);
+    }
+
     setLoading(false);
-  };
+  }
 
-  const returnPromises = (coordinates: Coordinate[]): Promise<Result>[] => {
-    return coordinates.map(async (coord) => {
-      const lat = parseCoordinate(coord.latitude);
-      const lon = parseCoordinate(coord.longitude);
-      if (lat == null || lon == null) return { coord, features: [] };
-      const envelope = latLonToEnvelope(lat, lon);
-      try {
-        const res = await fetchDepthForEnvelope(envelope);
-        return { coord, features: res.features };
-      } catch {
-        return { coord, features: [] };
+  async function runInBatches(
+    coordinates: Coordinate[],
+    batchSize = 10,
+  ): Promise<Result[]> {
+    const results: Result[] = [];
+    let index = 0;
+
+    while (index < coordinates.length) {
+      const batch = coordinates.slice(index, index + batchSize);
+
+      const batchPromises = batch.map(async (coord) => {
+        const lat = parseCoordinate(coord.latitude);
+        const lon = parseCoordinate(coord.longitude);
+        if (lat == null || lon == null) return { coord, features: [] };
+
+        const envelope = latLonToEnvelope(lat, lon);
+        try {
+          const res = await fetchDepthForEnvelope(envelope);
+          return { coord, features: res.features };
+        } catch (err) {
+          console.warn(
+            `Erro na coordenada lat:${coord.latitude}, lon:${coord.longitude}`,
+            err,
+          );
+          return { coord, features: [] };
+        }
+      });
+
+      // Executa e armazena os resultados do batch
+      const batchResults = await Promise.all(batchPromises);
+      results.push(...batchResults);
+
+      index += batchSize;
+
+      if (index < coordinates.length) {
+        await new Promise((resolve) => setTimeout(resolve, BATCH_DELAY));
       }
-    });
-  };
+    }
 
-  const addCoordinate = () =>
-    setCoordinates([...coordinates, { latitude: "", longitude: "" }]);
+    return results;
+  }
+
+  const addCoordinate = (latValue = "", lonValue = "") =>
+    setCoordinates([
+      ...coordinates,
+      { latitude: latValue, longitude: lonValue },
+    ]);
 
   const removeCoordinate = (index: number) =>
     setCoordinates(coordinates.filter((_, i) => i !== index));
@@ -124,6 +172,57 @@ export default function Home() {
     const newCoords = [...coordinates];
     newCoords[index]![field] = value;
     setCoordinates(newCoords);
+  };
+
+  function parseStringCoordinate(coordinate: string): number {
+    const regex = /(\d{1,3})°\s*(\d{1,2})'?(\d{1,2}(?:\.\d+)?)?"?([NSEW])/i;
+    const match = regex.exec(coordinate.trim());
+
+    if (!match?.[1] || !match[2] || !match[3] || !match[4]) {
+      throw new Error(`Formato de coordenada inválido: ${coordinate}`);
+    }
+
+    const degrees = parseInt(match[1], 10);
+    const minutes = parseInt(match[2], 10);
+    const seconds = parseFloat(match[3]);
+    const direction = match[4].toUpperCase();
+
+    let decimal = degrees + minutes / 60 + seconds / 3600;
+
+    if (direction === "S" || direction === "W") {
+      decimal *= -1;
+    }
+
+    // Arredonda para duas casas decimais
+    return Math.round(decimal * 100) / 100;
+  }
+
+  const displayCsvValues = (results: Papa.ParseResult<CsvSchema>) => {
+    const newCoordinates: Coordinate[] = [];
+
+    results.data.forEach((row, index) => {
+      if (index > 2) {
+        const csvRow: CsvSchema = row;
+        const lat = csvRow._3;
+        const lon = csvRow._6;
+
+        if (lat && lon) {
+          try {
+            const parsedLat = parseStringCoordinate(lat);
+            const parsedLon = parseStringCoordinate(lon);
+            newCoordinates.push({
+              latitude: parsedLat.toString(),
+              longitude: parsedLon.toString(),
+            });
+          } catch (e) {
+            console.warn(`Erro ao parsear coordenada na linha ${index + 1}`);
+          }
+        }
+      }
+    });
+
+    // Atualize o estado apenas uma vez
+    setCoordinates((prev) => [...prev, ...newCoordinates]);
   };
 
   return (
@@ -162,7 +261,7 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => removeCoordinate(index)}
-                className="flex items-center justify-center rounded-lg bg-red-500 p-2 text-white transition hover:bg-red-600"
+                className="flex cursor-pointer items-center justify-center rounded-lg bg-red-500 p-2 text-white transition hover:bg-red-600"
               >
                 <TrashIcon className="h-5 w-5" />
               </button>
@@ -170,19 +269,44 @@ export default function Home() {
           </div>
         ))}
 
-        <div className="flex flex-col gap-4 sm:flex-row">
+        <div className="flex flex-col gap-4 sm:flex-row sm:flex-wrap">
           <button
             type="button"
-            onClick={addCoordinate}
-            className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg bg-green-600 px-4 py-2 text-white transition hover:bg-green-700"
+            onClick={() => addCoordinate()}
+            className="inline-flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-lg bg-green-600 px-4 py-2 text-white transition hover:bg-green-700"
           >
-            <PlusIcon className="h-5 w-5" /> Adicionar coordenada
+            <PlusIcon className="h-5 w-5" />
+            Adicionar coordenada
           </button>
+
+          <label className="inline-flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-lg bg-yellow-500 px-4 py-2 text-white transition hover:bg-yellow-600">
+            <ArrowUpTrayIcon className="h-5 w-5" />
+            Upload CSV
+            <input
+              type="file"
+              accept=".csv"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) {
+                  Papa.parse(file, {
+                    delimiter: ";",
+                    skipEmptyLines: true,
+                    dynamicTyping: true,
+                    header: true,
+
+                    complete: (results: Papa.ParseResult<CsvSchema>) =>
+                      displayCsvValues(results),
+                  });
+                }
+              }}
+            />
+          </label>
 
           <button
             type="submit"
             disabled={loading}
-            className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-white transition hover:bg-blue-700 disabled:opacity-60"
+            className="inline-flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-white transition hover:bg-blue-700 disabled:opacity-60"
           >
             <MagnifyingGlassIcon className="h-5 w-5" />
             {loading ? "Consultando..." : "Buscar Batimetria"}
