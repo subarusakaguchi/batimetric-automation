@@ -6,60 +6,21 @@ import {
   TrashIcon,
   MagnifyingGlassIcon,
 } from "@heroicons/react/24/solid";
-
-type Coordinate = {
-  latitude: string;
-  longitude: string;
-};
-
-interface Envelope {
-  xmin: number;
-  ymin: number;
-  xmax: number;
-  ymax: number;
-  spatialReference: Wkid;
-}
-
-interface Wkid {
-  wkid: number;
-}
-
-interface BatimetriaResponse {
-  displayFieldName: string;
-  features: Array<Attribute>;
-  fieldAliases: FieldAliases;
-  fields: Array<Field>;
-}
-
-type FieldAliases = Record<string, string>;
-
-interface Attribute {
-  attributes: AttributeType;
-}
-
-type AttributeType = Record<string, string | number | null>;
-
-interface Field {
-  name: string;
-  type: string;
-  alias: string;
-  length: number;
-}
-
-const API_URL =
-  "https://geoportal.sgb.gov.br/server/rest/services/geologia_marinha/batimetria/MapServer/dynamicLayer/query?";
-
-const WKID = 102100;
+import type {
+  BatimetriaResponse,
+  Coordinate,
+  Envelope,
+  Result,
+} from "~/interfaces";
+import { API_URL, RADIUS, WKID } from "~/utils/constants";
 
 export default function Home() {
+  const [results, setResults] = useState<Result[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const [coordinates, setCoordinates] = useState<Coordinate[]>([
     { latitude: "", longitude: "" },
   ]);
-  const [results, setResults] = useState<
-    Array<{ coord: Coordinate; features: BatimetriaResponse["features"] }>
-  >([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
 
   const parseCoordinate = (value: string): number | null => {
     const parsed = parseFloat(value.replace(",", "."));
@@ -71,11 +32,26 @@ export default function Home() {
     longitude: number,
     deltaMeters = 1000,
   ): Envelope => {
-    const RADIUS = 6378137.0;
-    const x = RADIUS * ((longitude * Math.PI) / 180);
-    const y =
-      RADIUS * Math.log(Math.tan(Math.PI / 4 + (latitude * Math.PI) / 180 / 2));
+    const x = calcXValue(longitude);
+    const y = calcYValue(latitude);
+    return returnEnvelope(x, y, deltaMeters);
+  };
 
+  const calcXValue = (longitude: number): number => {
+    return RADIUS * ((longitude * Math.PI) / 180);
+  };
+
+  const calcYValue = (latitude: number): number => {
+    return (
+      RADIUS * Math.log(Math.tan(Math.PI / 4 + (latitude * Math.PI) / 180 / 2))
+    );
+  };
+
+  const returnEnvelope = (
+    x: number,
+    y: number,
+    deltaMeters: number,
+  ): Envelope => {
     return {
       xmin: x - deltaMeters,
       ymin: y - deltaMeters,
@@ -86,24 +62,26 @@ export default function Home() {
   };
 
   const fetchDepthForEnvelope = async (
-    env: Envelope,
+    envelope: Envelope,
   ): Promise<BatimetriaResponse> => {
-    const params = new URLSearchParams({
+    const params = returnSearchParams(envelope);
+    const res = await fetch(API_URL + params.toString());
+    if (!res.ok) throw new Error(`Erro na API: ${res.status}`);
+    return (await res.json()) as BatimetriaResponse;
+  };
+
+  const returnSearchParams = (envelope: Envelope): URLSearchParams => {
+    return new URLSearchParams({
       f: "json",
       returnGeometry: "false",
       spatialRel: "esriSpatialRelIntersects",
-      geometry: JSON.stringify(env),
+      geometry: JSON.stringify(envelope),
       geometryType: "esriGeometryEnvelope",
       inSR: "102100",
       outFields: "profundida",
       outSR: "102100",
       layer: '{"source":{"type":"mapLayer","mapLayerId":0}}',
     });
-
-    const res = await fetch(API_URL + params.toString());
-    if (!res.ok) throw new Error(`Erro na API: ${res.status}`);
-
-    return (await res.json()) as BatimetriaResponse;
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -111,13 +89,17 @@ export default function Home() {
     setLoading(true);
     setError("");
     setResults([]);
+    const promises = returnPromises(coordinates);
+    const allResults = await Promise.all(promises);
+    setResults(allResults);
+    setLoading(false);
+  };
 
-    const promises = coordinates.map(async (coord) => {
+  const returnPromises = (coordinates: Coordinate[]): Promise<Result>[] => {
+    return coordinates.map(async (coord) => {
       const lat = parseCoordinate(coord.latitude);
       const lon = parseCoordinate(coord.longitude);
-
       if (lat == null || lon == null) return { coord, features: [] };
-
       const envelope = latLonToEnvelope(lat, lon);
       try {
         const res = await fetchDepthForEnvelope(envelope);
@@ -126,16 +108,14 @@ export default function Home() {
         return { coord, features: [] };
       }
     });
-
-    const allResults = await Promise.all(promises);
-    setResults(allResults);
-    setLoading(false);
   };
 
   const addCoordinate = () =>
     setCoordinates([...coordinates, { latitude: "", longitude: "" }]);
+
   const removeCoordinate = (index: number) =>
     setCoordinates(coordinates.filter((_, i) => i !== index));
+
   const updateCoordinate = (
     index: number,
     field: "latitude" | "longitude",
