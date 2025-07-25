@@ -337,7 +337,7 @@ export default function Home() {
                     <div key={j} className="text-sm text-gray-800">
                       {Object.entries(f.attributes).map(([key, val]) => (
                         <p key={key}>
-                          <span className="font-medium capitalize">{key}:</span>{" "}
+                          <span className="font-medium capitalize">{key}de:</span>{" "}
                           {val ?? "N/A"}
                         </p>
                       ))}
