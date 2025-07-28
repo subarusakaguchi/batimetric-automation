@@ -62,3 +62,5 @@ export interface CsvSchema {
   _15: string | null;
   _16: string | null;
 }
+
+export type CoordinateWithLayer = Coordinate & { mapLayerId?: number };

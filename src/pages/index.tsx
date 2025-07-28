@@ -10,6 +10,7 @@ import {
 import type {
   BatimetriaResponse,
   Coordinate,
+  CoordinateWithLayer,
   CsvSchema,
   Envelope,
   Result,
@@ -72,14 +73,18 @@ export default function Home() {
 
   const fetchDepthForEnvelope = async (
     envelope: Envelope,
+    mapLayerId: number,
   ): Promise<BatimetriaResponse> => {
-    const params = returnSearchParams(envelope);
+    const params = returnSearchParams(envelope, mapLayerId);
     const res = await fetch(API_URL + params.toString());
     if (!res.ok) throw new Error(`Erro na API: ${res.status}`);
     return (await res.json()) as BatimetriaResponse;
   };
 
-  const returnSearchParams = (envelope: Envelope): URLSearchParams => {
+  const returnSearchParams = (
+    envelope: Envelope,
+    mapLayerId: number,
+  ): URLSearchParams => {
     return new URLSearchParams({
       f: "json",
       returnGeometry: "false",
@@ -89,7 +94,12 @@ export default function Home() {
       inSR: "102100",
       outFields: "profundida",
       outSR: "102100",
-      layer: '{"source":{"type":"mapLayer","mapLayerId":0}}',
+      layer: JSON.stringify({
+        source: {
+          type: "mapLayer",
+          mapLayerId,
+        },
+      }),
     });
   };
 
@@ -118,10 +128,13 @@ export default function Home() {
     batchSize = 10,
   ): Promise<Result[]> {
     const results: Result[] = [];
-    let index = 0;
+    const queue: CoordinateWithLayer[] = coordinates.map((coord) => ({
+      ...coord,
+      mapLayerId: 0,
+    }));
 
-    while (index < coordinates.length) {
-      const batch = coordinates.slice(index, index + batchSize);
+    while (queue.length > 0) {
+      const batch = queue.splice(0, batchSize); // retira os primeiros `batchSize` itens
 
       const batchPromises = batch.map(async (coord) => {
         const lat = parseCoordinate(coord.latitude);
@@ -130,7 +143,10 @@ export default function Home() {
 
         const envelope = latLonToEnvelope(lat, lon);
         try {
-          const res = await fetchDepthForEnvelope(envelope);
+          const res = await fetchDepthForEnvelope(
+            envelope,
+            coord.mapLayerId ?? 0,
+          );
           return { coord, features: res.features };
         } catch (err) {
           console.warn(
@@ -141,13 +157,24 @@ export default function Home() {
         }
       });
 
-      // Executa e armazena os resultados do batch
       const batchResults = await Promise.all(batchPromises);
-      results.push(...batchResults);
 
-      index += batchSize;
+      for (const result of batchResults) {
+        if (
+          result.features.length === 0 &&
+          (result.coord.mapLayerId ?? 0) < 5
+        ) {
+          // Reenfileira no início com mapLayerId incrementado
+          queue.unshift({
+            ...result.coord,
+            mapLayerId: (result.coord.mapLayerId ?? 0) + 1,
+          });
+        } else {
+          results.push(result);
+        }
+      }
 
-      if (index < coordinates.length) {
+      if (queue.length > 0) {
         await new Promise((resolve) => setTimeout(resolve, BATCH_DELAY));
       }
     }
@@ -337,7 +364,9 @@ export default function Home() {
                     <div key={j} className="text-sm text-gray-800">
                       {Object.entries(f.attributes).map(([key, val]) => (
                         <p key={key}>
-                          <span className="font-medium capitalize">{key}de:</span>{" "}
+                          <span className="font-medium capitalize">
+                            {key}de:
+                          </span>{" "}
                           {val ?? "N/A"}
                         </p>
                       ))}
